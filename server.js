@@ -7,7 +7,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Serve static files from 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
 // --- GAME CONSTANTS ---
@@ -15,7 +14,6 @@ const RED = 1;
 const BLUE = 2;
 const EMPTY = 0;
 
-// Directions
 const DIRS_KING = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 const DIRS_KNIGHT = [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]];
 
@@ -24,7 +22,7 @@ class RezzoGame {
         this.N = size;
         this.board = [];
         this.turn = RED;
-        this.turnPhase = 0; // 0: Start, 1: Moved one single piece
+        this.turnPhase = 0; 
         this.firstMovePiece = null;
         this.history = new Set();
         this.isRedFirstTurn = true;
@@ -55,11 +53,9 @@ class RezzoGame {
 
     initBoard() {
         this.board = Array(this.N).fill(null).map(() => Array(this.N).fill(EMPTY));
-        // Red (Rows 0, 1)
         for (let r = 0; r < 2; r++) {
             for (let c = 0; c < this.N; c++) this.board[r][c] = RED;
         }
-        // Blue (Rows N-1, N-2)
         for (let r = this.N - 2; r < this.N; r++) {
             for (let c = 0; c < this.N; c++) this.board[r][c] = BLUE;
         }
@@ -102,8 +98,6 @@ class RezzoGame {
         return r >= 0 && r < this.N && c >= 0 && c < this.N;
     }
 
-    // --- LOGIC HELPERS ---
-
     getLegalSingleMoves(r, c) {
         const moves = [];
         const allDirs = [...DIRS_KING, ...DIRS_KNIGHT];
@@ -118,7 +112,6 @@ class RezzoGame {
     }
 
     getValidTrainDestinations(tailR, tailC) {
-        // Red cannot move train on first move
         if (this.turn === RED && this.isRedFirstTurn) return [];
 
         const moves = [];
@@ -141,7 +134,7 @@ class RezzoGame {
 
             const head = trainPieces[trainPieces.length - 1];
             const length = trainPieces.length;
-            if (length < 2) continue; // Train must be >= 2
+            if (length < 2) continue; 
 
             let dist = 1;
             let moveR = head.r + dr;
@@ -159,7 +152,6 @@ class RezzoGame {
                     // Continue
                 } else {
                     const enemyResult = this.analyzeEnemyAlignment(moveR, moveC, dr, dc, targetContent);
-                    
                     if (enemyResult.type === 'isolated' || enemyResult.type === 'diff_orientation') {
                         isCapture = true; 
                         stop = true; 
@@ -170,7 +162,7 @@ class RezzoGame {
                             stop = true;
                             captureInfo = enemyResult;
                         } else {
-                            stop = true; // Blocked by equal or longer alignment
+                            stop = true;
                         }
                     }
                 }
@@ -257,7 +249,7 @@ class RezzoGame {
                     for(let m of trains) {
                         if(m.capture) {
                             for(let p of piecesOnGoal) {
-                                if(m.dest.r === p.r && m.dest.c === p.c) return false; // Found a capture
+                                if(m.dest.r === p.r && m.dest.c === p.c) return false;
                             }
                         }
                     }
@@ -285,14 +277,11 @@ class RezzoGame {
         }
     }
 
-    // --- MAIN ACTION ---
     processIntent(from, to) {
-        // 1. Try Single Move Logic
         const singles = this.getLegalSingleMoves(from.r, from.c);
         const singleMatch = singles.find(m => m.r === to.r && m.c === to.c);
         
         if (singleMatch) {
-            // Check Phase constraints
             if (this.turnPhase === 1) {
                 if (this.firstMovePiece && this.firstMovePiece.r === from.r && this.firstMovePiece.c === from.c) {
                     return { success: false, reason: "Must move a different piece" };
@@ -301,8 +290,6 @@ class RezzoGame {
             return this.executeMove({ type: 'single', from: from, to: to });
         }
 
-        // 2. Try Train Move Logic
-        // Only allowed in Phase 0
         if (this.turnPhase !== 0) return { success: false, reason: "Invalid Single Move (Train not allowed in phase 2)" };
 
         const trains = this.getValidTrainDestinations(from.r, from.c);
@@ -355,33 +342,48 @@ class RezzoGame {
             for(let p of trainCoords) this.board[p.r + shiftR][p.c + shiftC] = pieceColor;
         }
 
-        // 2. Turn Logic & Win condition check for Single Move
+        // 2. Turn Logic (UPDATED RULE)
         let willSwapTurn = false;
         let nextTurn = this.turn;
+        const winningRow = (this.turn === RED) ? this.N - 1 : 0;
 
         if (move.type === 'train') {
+            // Trains always end turn
             willSwapTurn = true;
             nextTurn = (this.turn === RED) ? BLUE : RED;
         } else {
-            const winningRow = (this.turn === RED) ? this.N - 1 : 0;
-            // Rule: Single move to last row ends turn immediately
-            if (move.to.r === winningRow) {
-                willSwapTurn = true;
-                nextTurn = (this.turn === RED) ? BLUE : RED;
-            } else if (this.turnPhase === 0) {
+            // Single Move Logic
+            const landedOnGoal = (move.to.r === winningRow);
+
+            if (this.turnPhase === 0) {
+                // First move of turn
                 if (this.isRedFirstTurn && this.turn === RED) {
+                    // Exception: Red's first turn is only 1 move
                     willSwapTurn = true;
                     nextTurn = BLUE;
                 } else {
+                    // NEW RULE: Can make second move even if landed on goal, 
+                    // unless impossible.
                     if (!this.canMakeSecondMove(move.to)) {
                         willSwapTurn = true;
                         nextTurn = (this.turn === RED) ? BLUE : RED;
                     } else {
                         willSwapTurn = false;
                         nextTurn = this.turn;
+                        // Note: we track that we moved to goal implicitly via firstMovePiece
                     }
                 }
             } else {
+                // Second move (Phase 1)
+                // RULE CHECK: "either the first may move to the last row or the second but not both"
+                // Check if first move was to goal
+                const firstLandedOnGoal = (this.firstMovePiece.r === winningRow);
+                
+                if (firstLandedOnGoal && landedOnGoal) {
+                    this.board = backupBoard;
+                    return { success: false, reason: "Cannot move two pieces to the last row in one turn" };
+                }
+
                 willSwapTurn = true;
                 nextTurn = (this.turn === RED) ? BLUE : RED;
             }
@@ -408,7 +410,6 @@ class RezzoGame {
             if (this.isRedFirstTurn) this.isRedFirstTurn = false;
         }
 
-        // Highlight data for client
         const highlights = [];
         if(move.type === 'single') { highlights.push(move.from); highlights.push(move.to); }
         else { highlights.push(move.tail); highlights.push(move.dest); }
@@ -416,8 +417,6 @@ class RezzoGame {
         return { success: true, highlights };
     }
 }
-
-// --- SERVER SETUP ---
 
 const games = new Map();
 
@@ -435,7 +434,6 @@ io.on('connection', (socket) => {
         });
         
         socket.join(gameId);
-        // FIX: Send the initial board state immediately
         socket.emit('game_created', { 
             gameId, 
             color: RED, 
@@ -461,7 +459,7 @@ io.on('connection', (socket) => {
             socket.emit('joined_game', { 
                 color: BLUE, 
                 size: session.game.N,
-                board: session.game.board // Send board to joiner too
+                board: session.game.board
             });
         } else {
             socket.emit('error', 'Game full');
@@ -487,6 +485,7 @@ io.on('connection', (socket) => {
             io.to(gameId).emit('board_update', {
                 board: game.board,
                 turn: game.turn,
+                turnPhase: game.turnPhase, // Send Phase info to client
                 highlights: result.highlights,
                 gameOver: game.gameOver,
                 winner: game.winner
@@ -497,7 +496,6 @@ io.on('connection', (socket) => {
     });
     
     socket.on('disconnect', () => {
-        // Optional: Handle player disconnect
     });
 });
 
