@@ -26,7 +26,6 @@
             gap: 1px; 
             background: #34495e; 
             border: 5px solid #34495e; 
-            /* Fixed dimensions to prevent collapse */
             width: 100%;
             max-width: 80vh; 
             aspect-ratio: 1; 
@@ -79,16 +78,15 @@
 <script>
     const socket = io();
     
-    let myColor = 0; // 1=Red, 2=Blue
+    let myColor = 0; 
     let boardData = [];
     let currentTurn = 1;
+    let currentPhase = 0; // Added phase tracking
     let N = 13;
     let gameId = "";
     
     let selectedPos = null;
     let lastHighlights = [];
-
-    // --- Networking ---
 
     function createGame() {
         const size = parseInt(document.getElementById('size-in').value);
@@ -100,13 +98,11 @@
         if(id) socket.emit('join_game', id);
     }
 
-    // Server sends 'game_created' with initial board data
     socket.on('game_created', (data) => {
         setupGameUI(data.gameId, data.color, data.size, data.board);
     });
 
     socket.on('joined_game', (data) => {
-        // FIX: Grab the Game ID from the input field since server doesn't echo it back
         const enteredId = document.getElementById('join-id').value.toUpperCase();
         setupGameUI(enteredId, data.color, data.size, data.board);
     });
@@ -121,6 +117,7 @@
     socket.on('board_update', (data) => {
         boardData = data.board;
         currentTurn = data.turn;
+        currentPhase = data.turnPhase || 0; // Receive phase
         lastHighlights = data.highlights || [];
         updateUI();
         
@@ -132,27 +129,21 @@
 
     socket.on('error', (msg) => {
         alert("Error: " + msg);
-        // Deselect if move failed
         selectedPos = null;
         renderBoard();
     });
 
-    // --- UI Logic ---
-
     function setupGameUI(id, color, size, initialBoard) {
         if(id) gameId = id;
         myColor = color;
-        // Parse size or default to 13 if missing
         N = parseInt(size) || 13;
         
         document.getElementById('lobby').style.display = 'none';
         document.getElementById('game-ui').style.display = 'flex';
         document.getElementById('display-id').innerText = gameId || "Joined";
         
-        // Init board with data from server, or empty 0s if something went wrong
         boardData = initialBoard || Array(N).fill(0).map(()=>Array(N).fill(0));
         
-        // CSS Grid
         const boardEl = document.getElementById('board');
         boardEl.style.gridTemplateColumns = `repeat(${N}, 1fr)`;
         boardEl.style.gridTemplateRows = `repeat(${N}, 1fr)`;
@@ -163,12 +154,17 @@
     function updateUI() {
         const badge = document.getElementById('turn-badge');
         if (currentTurn === myColor) {
-            badge.innerText = "YOUR TURN";
-            badge.style.background = "#2ecc71"; // Green
+            // NEW: Show Move 2 indicator
+            if (currentPhase === 1) {
+                badge.innerText = "YOUR TURN (Move 2/2)";
+            } else {
+                badge.innerText = "YOUR TURN";
+            }
+            badge.style.background = "#2ecc71"; 
             badge.style.color = "white";
         } else {
             badge.innerText = "OPPONENT'S TURN";
-            badge.style.background = "#e74c3c"; // Red
+            badge.style.background = "#e74c3c"; 
             badge.style.color = "white";
         }
         renderBoard();
@@ -178,12 +174,10 @@
         const boardEl = document.getElementById('board');
         boardEl.innerHTML = '';
         
-        // Orientation: If I am Blue (2), flip the board so I play from bottom
         const isFlipped = (myColor === 2);
         
         for (let r_vis = 0; r_vis < N; r_vis++) {
             for (let c_vis = 0; c_vis < N; c_vis++) {
-                // Map visual coords to logical coords
                 let r, c;
                 if (isFlipped) {
                     r = r_vis; 
@@ -196,7 +190,6 @@
                 const sq = document.createElement('div');
                 sq.className = `square ${(r+c)%2===0 ? 'dark' : ''}`;
                 
-                // Highlights
                 if (selectedPos && selectedPos.r === r && selectedPos.c === c) {
                     sq.classList.add('selected');
                 }
@@ -204,7 +197,6 @@
                     sq.classList.add('last-move');
                 }
 
-                // Piece
                 const val = boardData[r][c];
                 if (val !== 0) {
                     const p = document.createElement('div');
@@ -223,23 +215,21 @@
 
         const clickedVal = boardData[r][c];
 
-        // 1. Deselect
         if (selectedPos && selectedPos.r === r && selectedPos.c === c) {
             selectedPos = null;
             renderBoard();
             return;
         }
 
-        // 2. Select Own Piece
         if (clickedVal === myColor) {
+            // In Phase 1, ensure they pick a DIFFERENT piece?
+            // Server enforces it, but UI can allow clicking.
             selectedPos = {r, c};
             renderBoard();
             return;
         }
 
-        // 3. Move
         if (selectedPos) {
-            // Send intent to server
             socket.emit('submit_move', {
                 gameId,
                 from: selectedPos,
