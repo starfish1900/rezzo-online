@@ -7,44 +7,20 @@
     <style>
         :root { --bg-color: #2c3e50; --square-light: #fdfdfd; --square-dark: #e0e0e0; --red-piece: #e74c3c; --blue-piece: #3498db; --highlight-selected: #ffd3b6; --highlight-move: #a8e6cf; --highlight-last: #dcedc1; }
         body { font-family: 'Segoe UI', sans-serif; background: var(--bg-color); color: white; display:flex; flex-direction:column; align-items:center; height:100vh; margin:0; padding-top: 20px; }
-        
         #lobby { display: flex; flex-direction: column; gap: 15px; background: rgba(0,0,0,0.3); padding: 30px; border-radius: 8px; text-align: center; }
         #game-ui { display: none; width: 100%; height: 100%; flex-direction: column; align-items: center; }
-        
-        #board-container { 
-            flex: 1; 
-            display:flex; 
-            justify-content:center; 
-            align-items:center; 
-            width:100%; 
-            box-sizing: border-box;
-            padding: 10px;
-        }
-        
-        #board { 
-            display: grid; 
-            gap: 1px; 
-            background: #34495e; 
-            border: 5px solid #34495e; 
-            width: 100%;
-            max-width: 80vh; 
-            aspect-ratio: 1; 
-        }
-        
+        #board-container { flex: 1; display:flex; justify-content:center; align-items:center; width:100%; box-sizing: border-box; padding: 10px; }
+        #board { display: grid; gap: 1px; background: #34495e; border: 5px solid #34495e; width: 100%; max-width: 80vh; aspect-ratio: 1; }
         .square { display: flex; justify-content: center; align-items: center; cursor: pointer; background: var(--square-light); position:relative; }
         .square.dark { background: var(--square-dark); }
-        
         .piece { width: 80%; height: 80%; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .piece.red { background: radial-gradient(circle at 30% 30%, #ff7675, #c0392b); }
         .piece.blue { background: radial-gradient(circle at 30% 30%, #74b9ff, #2980b9); }
-        
         .selected { background: var(--highlight-selected) !important; }
         .last-move { background: var(--highlight-last) !important; }
-        
         button { padding: 10px 20px; font-size: 1rem; cursor: pointer; border-radius: 4px; border:none; background: #27ae60; color: white; }
         button:hover { background: #2ecc71; }
         input { padding: 8px; border-radius: 4px; border: none; }
-        
         #turn-badge { padding: 5px 10px; border-radius: 4px; font-weight: bold; margin-bottom: 10px; background: #fff; color: #333; }
     </style>
     <script src="/socket.io/socket.io.js"></script>
@@ -63,6 +39,7 @@
             <input type="text" id="join-id" placeholder="Game ID (e.g. A1B2)">
             <button onclick="joinGame()">Join Game</button>
         </div>
+        <p style="font-size:0.8em; color:#aaa;" id="pid-display"></p>
     </div>
 
     <div id="game-ui">
@@ -78,25 +55,41 @@
 <script>
     const socket = io();
     
-    let myColor = 0; 
+    // Identity Management
+    let playerId = sessionStorage.getItem('rezzo_pid');
+    if (!playerId) {
+        playerId = Math.random().toString(36).substring(2) + Date.now().toString(36);
+        sessionStorage.setItem('rezzo_pid', playerId);
+    }
+    document.getElementById('pid-display').innerText = "Player Token: " + playerId.substring(0,6)+"...";
+
+    let myColor = 0; // 0=Spectator, 1=Red, 2=Blue
     let boardData = [];
     let currentTurn = 1;
-    let currentPhase = 0; // Added phase tracking
+    let currentPhase = 0;
     let N = 13;
     let gameId = "";
     
     let selectedPos = null;
     let lastHighlights = [];
 
+    // --- Networking ---
+
     function createGame() {
         const size = parseInt(document.getElementById('size-in').value);
-        socket.emit('create_game', { size });
+        socket.emit('create_game', { size, playerId });
     }
 
     function joinGame() {
-        const id = document.getElementById('join-id').value.toUpperCase();
-        if(id) socket.emit('join_game', id);
+        let id = document.getElementById('join-id').value.toUpperCase();
+        if(id) socket.emit('join_game', { gameId: id, playerId });
     }
+
+    socket.on('connect', () => {
+        if(gameId) {
+            socket.emit('join_game', { gameId, playerId });
+        }
+    });
 
     socket.on('game_created', (data) => {
         setupGameUI(data.gameId, data.color, data.size, data.board);
@@ -104,7 +97,7 @@
 
     socket.on('joined_game', (data) => {
         const enteredId = document.getElementById('join-id').value.toUpperCase();
-        setupGameUI(enteredId, data.color, data.size, data.board);
+        setupGameUI(enteredId || gameId, data.color, data.size, data.board);
     });
 
     socket.on('game_start', (data) => {
@@ -117,7 +110,7 @@
     socket.on('board_update', (data) => {
         boardData = data.board;
         currentTurn = data.turn;
-        currentPhase = data.turnPhase || 0; // Receive phase
+        currentPhase = data.turnPhase || 0;
         lastHighlights = data.highlights || [];
         updateUI();
         
@@ -128,10 +121,13 @@
     });
 
     socket.on('error', (msg) => {
-        alert("Error: " + msg);
+        console.error(msg);
+        if(msg !== "Game full" && msg !== "Not your turn" && msg !== "Spectators cannot play") alert("Error: " + msg);
         selectedPos = null;
         renderBoard();
     });
+
+    // --- UI Logic ---
 
     function setupGameUI(id, color, size, initialBoard) {
         if(id) gameId = id;
@@ -153,18 +149,22 @@
 
     function updateUI() {
         const badge = document.getElementById('turn-badge');
-        if (currentTurn === myColor) {
-            // NEW: Show Move 2 indicator
+        
+        if (myColor === 0) { // SPECTATOR
+            badge.innerText = "SPECTATING";
+            badge.style.background = "#95a5a6"; // Grey
+            badge.style.color = "white";
+        } else if (currentTurn === myColor) {
             if (currentPhase === 1) {
                 badge.innerText = "YOUR TURN (Move 2/2)";
             } else {
                 badge.innerText = "YOUR TURN";
             }
-            badge.style.background = "#2ecc71"; 
+            badge.style.background = "#2ecc71"; // Green
             badge.style.color = "white";
         } else {
             badge.innerText = "OPPONENT'S TURN";
-            badge.style.background = "#e74c3c"; 
+            badge.style.background = "#e74c3c"; // Red
             badge.style.color = "white";
         }
         renderBoard();
@@ -174,6 +174,7 @@
         const boardEl = document.getElementById('board');
         boardEl.innerHTML = '';
         
+        // Spectators see standard view (Red at bottom)
         const isFlipped = (myColor === 2);
         
         for (let r_vis = 0; r_vis < N; r_vis++) {
@@ -211,7 +212,8 @@
     }
 
     function handleSquareClick(r, c) {
-        if (currentTurn !== myColor) return; 
+        // Disable for Spectators (0) and Opponents
+        if (myColor === 0 || currentTurn !== myColor) return; 
 
         const clickedVal = boardData[r][c];
 
@@ -222,8 +224,6 @@
         }
 
         if (clickedVal === myColor) {
-            // In Phase 1, ensure they pick a DIFFERENT piece?
-            // Server enforces it, but UI can allow clicking.
             selectedPos = {r, c};
             renderBoard();
             return;
@@ -233,7 +233,8 @@
             socket.emit('submit_move', {
                 gameId,
                 from: selectedPos,
-                to: {r, c}
+                to: {r, c},
+                playerId 
             });
             selectedPos = null;
             renderBoard();
