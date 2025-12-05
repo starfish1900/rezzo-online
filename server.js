@@ -13,6 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const RED = 1;
 const BLUE = 2;
 const EMPTY = 0;
+const SPECTATOR = 0; // New Constant
 
 const DIRS_KING = [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]];
 const DIRS_KNIGHT = [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]];
@@ -213,13 +214,24 @@ class RezzoGame {
         return { type: 'isolated' };
     }
 
-    canMakeSecondMove(justMovedCurrentPos) {
-        for (let r=0; r<this.N; r++) {
-            for (let c=0; c<this.N; c++) {
-                if (r === justMovedCurrentPos.r && c === justMovedCurrentPos.c) continue; 
-                if (this.board[r][c] === this.turn) {
-                    if (this.getLegalSingleMoves(r, c).length > 0) return true;
-                }
+    canMakeSecondMove(justMovedCurrentPos, forbid_goal_row=null) {
+        const pieces = []; // FIXED: Added 'const' declaration
+        for(let r=0; r<this.N; r++) {
+            for(let c=0; c<this.N; c++) {
+                if(this.board[r][c] === this.turn) pieces.push({r,c});
+            }
+        }
+        
+        for (let p of pieces) {
+            if (p.r === justMovedCurrentPos.r && p.c === justMovedCurrentPos.c) continue;
+            
+            const dests = this.getLegalSingleMoves(p.r, p.c);
+            
+            if (forbid_goal_row !== null) {
+                // If we find ANY move not on goal row, true
+                if (dests.some(d => d.r !== forbid_goal_row)) return true;
+            } else {
+                if (dests.length > 0) return true;
             }
         }
         return false;
@@ -342,48 +354,39 @@ class RezzoGame {
             for(let p of trainCoords) this.board[p.r + shiftR][p.c + shiftC] = pieceColor;
         }
 
-        // 2. Turn Logic (UPDATED RULE)
+        // 2. Turn Logic
         let willSwapTurn = false;
         let nextTurn = this.turn;
         const winningRow = (this.turn === RED) ? this.N - 1 : 0;
 
         if (move.type === 'train') {
-            // Trains always end turn
             willSwapTurn = true;
             nextTurn = (this.turn === RED) ? BLUE : RED;
         } else {
-            // Single Move Logic
             const landedOnGoal = (move.to.r === winningRow);
 
             if (this.turnPhase === 0) {
-                // First move of turn
                 if (this.isRedFirstTurn && this.turn === RED) {
-                    // Exception: Red's first turn is only 1 move
                     willSwapTurn = true;
                     nextTurn = BLUE;
                 } else {
-                    // NEW RULE: Can make second move even if landed on goal, 
-                    // unless impossible.
-                    if (!this.canMakeSecondMove(move.to)) {
+                    const forbid = landedOnGoal ? winningRow : null;
+                    if (!this.canMakeSecondMove(move.to, forbid)) {
                         willSwapTurn = true;
                         nextTurn = (this.turn === RED) ? BLUE : RED;
                     } else {
                         willSwapTurn = false;
                         nextTurn = this.turn;
-                        // Note: we track that we moved to goal implicitly via firstMovePiece
                     }
                 }
             } else {
-                // Second move (Phase 1)
-                // RULE CHECK: "either the first may move to the last row or the second but not both"
-                // Check if first move was to goal
-                const firstLandedOnGoal = (this.firstMovePiece.r === winningRow);
-                
-                if (firstLandedOnGoal && landedOnGoal) {
-                    this.board = backupBoard;
-                    return { success: false, reason: "Cannot move two pieces to the last row in one turn" };
+                // Phase 1
+                const firstOnGoal = (this.firstMovePiece.r === winningRow);
+                if (firstOnGoal && landedOnGoal) { 
+                    this.board = backupBoard; 
+                    return { success: false, reason: "Cannot move two pieces to the last row in one turn" }; 
                 }
-
+                
                 willSwapTurn = true;
                 nextTurn = (this.turn === RED) ? BLUE : RED;
             }
@@ -423,14 +426,17 @@ const games = new Map();
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    socket.on('create_game', ({ size }) => {
+    socket.on('create_game', ({ size, playerId }) => {
+        if (!playerId) { socket.emit('error', 'No Player ID'); return; }
+        
         const gameId = Math.random().toString(36).substring(2, 8).toUpperCase();
         const s = parseInt(size) || 13;
         const game = new RezzoGame(s);
         
         games.set(gameId, {
             game: game,
-            players: { [socket.id]: RED }
+            players: { [playerId]: RED }, 
+            sockets: { [playerId]: socket.id }
         });
         
         socket.join(gameId);
@@ -443,34 +449,79 @@ io.on('connection', (socket) => {
         console.log(`Game ${gameId} created by ${socket.id}`);
     });
 
-    socket.on('join_game', (gameId) => {
+    socket.on('join_game', ({ gameId, playerId }) => {
         const session = games.get(gameId);
         if (!session) { socket.emit('error', 'Game not found'); return; }
+        
+        socket.join(gameId); // Ensure socket is in room for broadcasts
 
+        // 1. Rejoining Player
+        if (session.players[playerId]) {
+            session.sockets[playerId] = socket.id;
+            socket.emit('joined_game', { 
+                color: session.players[playerId], 
+                size: session.game.N,
+                board: session.game.board
+            });
+            // Update state
+            socket.emit('board_update', {
+                board: session.game.board,
+                turn: session.game.turn,
+                turnPhase: session.game.turnPhase,
+                highlights: session.game.lastMoveHighlights,
+                gameOver: session.game.gameOver,
+                winner: session.game.winner
+            });
+            return;
+        }
+
+        // 2. New Player
         if (Object.keys(session.players).length < 2) {
-            session.players[socket.id] = BLUE;
-            socket.join(gameId);
+            session.players[playerId] = BLUE;
+            session.sockets[playerId] = socket.id;
             
             io.to(gameId).emit('game_start', { 
                 board: session.game.board,
                 turn: session.game.turn,
                 highlights: []
             });
+            
             socket.emit('joined_game', { 
                 color: BLUE, 
                 size: session.game.N,
                 board: session.game.board
             });
-        } else {
-            socket.emit('error', 'Game full');
+        } 
+        // 3. Spectator (New Logic)
+        else {
+            socket.emit('joined_game', { 
+                color: SPECTATOR, // 0
+                size: session.game.N,
+                board: session.game.board
+            });
+            // Immediately send current state details
+            socket.emit('board_update', {
+                board: session.game.board,
+                turn: session.game.turn,
+                turnPhase: session.game.turnPhase,
+                highlights: session.game.lastMoveHighlights,
+                gameOver: session.game.gameOver,
+                winner: session.game.winner
+            });
         }
     });
 
-    socket.on('submit_move', ({ gameId, from, to }) => {
+    socket.on('submit_move', ({ gameId, from, to, playerId }) => {
         const session = games.get(gameId);
         if (!session) return;
 
-        const playerColor = session.players[socket.id];
+        const playerColor = session.players[playerId];
+        // Spectators (undefined color or 0) cannot move
+        if (!playerColor || playerColor === SPECTATOR) {
+            socket.emit('error', 'Spectators cannot play');
+            return;
+        }
+
         const game = session.game;
 
         if (game.gameOver) return;
@@ -485,7 +536,7 @@ io.on('connection', (socket) => {
             io.to(gameId).emit('board_update', {
                 board: game.board,
                 turn: game.turn,
-                turnPhase: game.turnPhase, // Send Phase info to client
+                turnPhase: game.turnPhase,
                 highlights: result.highlights,
                 gameOver: game.gameOver,
                 winner: game.winner
